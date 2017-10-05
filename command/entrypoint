@@ -1,0 +1,22 @@
+#! /usr/bin/env mksh
+# -*- shell-script -*-
+
+CIRCUIT=/command/circuit
+CONFIG_DIR=/config/circuit.d
+CONFIG=/config/circuit
+HAPROXY_CFG=/usr/local/etc/haproxy/haproxy.cfg
+HAPROXY=/usr/local/sbin/haproxy-systemd-wrapper
+
+[[ -f ${HAPROXY_CFG} ]] || {
+    if [[ -f ${CONFIG} ]]
+    then cat "${CONFIG}" \
+            | cpp -I "${CONFIG_DIR}" -P \
+            | envsubst
+    else "${CIRCUIT}"
+    fi >"${HAPROXY_CFG}"
+}
+
+case ${#} in
+    0) exec "${HAPROXY}" -p /run/haproxy.pid -f "${HAPROXY_CFG}" ;;
+    *) exec "${HAPROXY}" "${@}"                                  ;;
+esac
