@@ -1,0 +1,16 @@
+#! /bin/sh
+# -*- shell-script -*-
+
+apk add --no-cache \
+    gettext \
+    libressl \
+    mksh \
+    pcc
+
+cp /usr/libexec/cpp /usr/local/bin/
+cp /usr/bin/envsubst /usr/local/bin/
+cp /usr/lib/libintl.so.* /usr/local/lib/
+
+apk del gettext pcc
+
+ln -s /command/circuit /usr/local/bin/
