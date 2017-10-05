@@ -1,0 +1,525 @@
+#+TITLE: circuit - hands-free SNI routing with haproxy
+#+LATEX: \pagebreak
+
+
+* Overview
+
+  ~circuit~ is a tool for detection of linked containers, and for
+  generation of haproxy configuration fragments to assist with routing to these
+  linked containers.
+
+  If ~circuit~ is invoked with no arguments, it defaults to the
+  ~generate-configuration~ function, which discovers linked hosts (as one might
+  find in a container running with Docker), and generates a set of rules that
+  route to the appropriate ports for those hosts, based on SNI lookups. Hosts
+  with matching certificates are automatically grouped for load balancing, and
+  monitored for availability via TCP health checks. Unreachable hosts are
+  removed from the load balancer until they become reachable again.
+
+  ~circuit~ is intended for use within Docker containers, and makes
+  assumptions that may not hold in other environments. Most functionality is
+  exposed through a collection of subcommands that make up the public API.
+
+* Notes
+
+  If circuit is invoked with a name matching any of the functions in the
+  public API, it will act as that function. This may be useful for using
+  circuit in scripts.
+
+
+* Documentation Style
+
+  The --help output of public functions includes a =FORMS= section, describing
+  the interface of that function. The style of these is intended to be both
+  human-friendly and simple to parse with tools like ~awk~:
+
+  #+BEGIN_EXAMPLE
+
+    function/arity required-argument (optional-argument=value)
+
+  #+END_EXAMPLE
+
+  As an example, a function called "greet" with one required argument "greeting"
+  and one optional argument "target" (that defaults to "world" if not given)
+  would be written like so:
+
+  #+BEGIN_EXAMPLE
+
+    FORMS
+      greet/2 greeting target
+      greet/1 greeting (target="world")
+
+  #+END_EXAMPLE
+
+* Commands
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      circuit
+    
+    COMMANDS
+    
+      backend-sni-lookup
+      define-server
+      define-tcp-backend
+      define-tcp-frontend
+      environment-links
+      frontend-sni-lookup
+      generate-configuration
+      generate-link-fragments
+      hostname-database-links
+      license
+      linked-port
+      links
+      list-commands
+      org-manual
+      remote-certificate
+      self-signed-certificate
+      show-source
+      tls-server
+      version
+      x509-common-name
+    
+  #+END_EXAMPLE
+
+
+** backend-sni-lookup
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      backend-sni-lookup - write a backend SNI lookup to STDOUT
+    
+    FORMS
+      backend-sni-lookup/2 name server
+      backend-sni-lookup/1 name (server=name)
+      backend-sni-lookup/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      backend-sni-lookup generates a configuration fragment for haproxy that matches the Server
+      Name Indication of a TLS request from a backend to the appropriate server.
+    
+  #+END_EXAMPLE
+
+
+** define-server
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      define-server - write a server definition to STDOUT
+    
+    FORMS
+      define-server/3 alias host port
+      define-server/2 alias host (port=443)
+      define-server/1 alias (host=alias) (port=443)
+      define-server (read from STDIN)
+    
+    DESCRIPTION
+    
+      define-server generates a configuration fragment for haproxy that defines a server with
+      health checks enabled.
+    
+  #+END_EXAMPLE
+
+
+** define-tcp-backend
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      define-tcp-backend - write a backend definition to STDOUT
+    
+    FORMS
+      define-tcp-backend/2 name algorithm
+      define-tcp-backend/1 name (algorithm='roundrobin')
+      define-tcp-backend/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      define-tcp-backend generates a configuration fragment for haproxy that defines a TCP backend
+      with load-balancing (roundrobin by default).
+    
+  #+END_EXAMPLE
+
+
+** define-tcp-frontend
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      define-tcp-frontend - write a frontend definition to STDOUT
+    
+    FORMS
+      define-tcp-frontend/2 name port
+      define-tcp-frontend/1 name (port=443)
+      define-tcp-frontend/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      define-tcp-frontend generates a configuration fragment for haproxy that defines a TCP
+      frontend that binds to a port (443 by default) and accepts TLS connections.
+    
+  #+END_EXAMPLE
+
+
+** environment-links
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      environment-links - print a sorted set of links from the environment to STDOUT
+    
+    FORMS
+      environment-links/0 (read from current environment)
+    
+    DESCRIPTION
+    
+      environment-links discovers links in the environment, assuming the environment is similar
+      to a container running with Docker. Specifically, it looks for environment
+      keys ending in '_PORT', with values that start with a protocol.
+     
+  #+END_EXAMPLE
+
+
+** frontend-sni-lookup
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      frontend-sni-lookup - write a frontend SNI lookup to STDOUT
+    
+    FORMS
+      frontend-sni-lookup/2 name backend
+      frontend-sni-lookup/1 name (backend=name)
+      frontend-sni-lookup/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      frontend-sni-lookup generates a configuration fragment for haproxy that matches the Server
+      Name Indication of a TLS request from a frontend to the appropriate backend.
+    
+  #+END_EXAMPLE
+
+
+** generate-configuration
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      generate-configuration - write configuration for SNI routing to available links to STDOUT
+    
+    FORMS
+      generate-configuration/1 name
+      generate-configuration/0 (name=HOSTNAME)
+    
+    DESCRIPTION
+    
+      generate-configuration writes a complete configuration file for haproxy to STDOUT.
+    
+    STABILITY
+    
+      The FORMS and the *general functionality* the output are stable and will
+      conform to Semantic Versioning 2.0.0. The literal output however, is NOT
+      considered stable, and may change at any time. Do not rely on it.
+    
+  #+END_EXAMPLE
+
+
+** generate-link-fragments
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      generate-link-fragments - generate config fragments for links and print directory to STDOUT
+    
+    FORMS
+      generate-link-fragments/1 dir
+      generate-link-fragments/0 (dir=(mktemp))
+    
+    DESCRIPTION
+    
+      generate-link-fragments generates a collection of haproxy configuration fragments for all
+      available links and writes them to a directory, then prints that directory
+      name to STDOUT. The directory structure is as follows:
+    
+        DIR/frontend      - (FILE) frontend configuration
+        DIR/backends/     - (DIR) contains backend configurations
+        DIR/backends/NAME - (FILE) configuration for backend NAME
+    
+  #+END_EXAMPLE
+
+
+** hostname-database-links
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      hostname-database-links - print a sorted set of links from a hostname database to STDOUT
+    
+    FORMS
+      hostname-database-links/1 file
+      hostname-database-links/0 (file=/etc/hosts)
+    
+    DESCRIPTION
+    
+      hostname-database-links discovers links in the hostname database (/etc/hosts by default).
+      Specifically, it finds names of IPv4 hosts, excluding itself.
+    
+  #+END_EXAMPLE
+
+
+** license
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      license - print license information to STDOUT
+    
+    FORMS
+      license/1 format
+      license/0 (format=full)
+    
+    FORMATS
+      full      - prints the full license text
+      name      - prints only the license name
+      copyright - prints only the copyright information
+      summary   - prints a short summary
+    
+    DESCRIPTION
+    
+      license is intended for use when generating documentation, but is exposed as part
+      of the public API to support packaging and distribution efforts.
+    
+  #+END_EXAMPLE
+
+
+** linked-port
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      linked-port - given a host, print the host and primary port to STDOUT
+    
+    FORMS
+      linked-port/1 host
+      linked-port/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      linked-port finds the primary exposed port for a host, assuming the environment is
+      similar to a container running with Docker. Specifically, it looks for
+      environment keys that match the upcased hostname with '_PORT' appended (and
+      dashes replaced with underscores).
+    
+  #+END_EXAMPLE
+
+
+** links
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      links - automatic link discovery
+    
+    FORMS
+      links/0
+    
+    DESCRIPTION
+    
+      links automates link discovery. It does so by finding the intersection of:
+    
+        - the set of linked hosts in the hostname database (/etc/hosts)
+        - the set of linked hosts given in the environment
+    
+      This is reliable in the context of a container running with Docker. For other
+      scenarios, it may be more practical to use the individual discovery methods.
+    
+    SEE ALSO
+      environment-links, hostname-database-links
+    
+  #+END_EXAMPLE
+
+
+** list-commands
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      list-commands - print a list of available commands to STDOUT
+    
+    FORMS
+      list-commands/0
+    
+    DESCRIPTION
+    
+      list-commands is intended for use when generating documentation, but is exposed as part
+      of the public API to support packaging and distribution efforts, and automated
+      testing.
+    
+  #+END_EXAMPLE
+
+
+** org-manual
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      org-manual - generate manual (Org)
+    
+    FORMS
+      org-manual/0
+    
+    DESCRIPTION
+    
+      org-manual generates documentation for circuit in Org format. Conversion to
+      other formats is beyond the scope of this program, and should be handled with
+      a tool such as ~pandoc~.
+    
+  #+END_EXAMPLE
+
+
+** remote-certificate
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      remote-certificate - print the TLS certificate from a remote host to STDOUT
+    
+    FORMS
+      remote-certificate/2 host port
+      remote-certificate/1 host (port=443)
+      remote-certificate/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      remote-certificate connects to a remote TLS host, prints the certificate to STDOUt, and
+      closes the connection.
+    
+    SEE ALSO
+      x509-common-name
+    
+  #+END_EXAMPLE
+
+
+** self-signed-certificate
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      self-signed-certificate - generate a self-signed TLS certificate and write the filename to STDOUT
+    
+    FORMS
+      self-signed-certificate/2 name expires
+      self-signed-certificate/1 name (expires=30)
+      self-signed-certificate/0 (name=HOSTNAME)
+    
+    DESCRIPTION
+    
+      self-signed-certificate writes a new (unencrypted and self-signed) TLS certificate to a file,
+      then prints that filename to STDOUT. This is intended to be used for testing
+      SNI routing, not for any sort of real-world scenario.
+    
+  #+END_EXAMPLE
+
+
+** show-source
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      show-source - print the source of a function to STDOUT
+    
+    FORMS
+      show-source/1 function
+      show-source/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      show-source is intended for use when generating documentation and reviewing changes
+      to circuit. However, it can also be used to extract functions for
+      reuse in other programs.
+    
+  #+END_EXAMPLE
+
+
+** tls-server
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      tls-server - run a simple TLS server
+    
+    FORMS
+      tls-server/2 name port
+      tls-server/1 name (port=443)
+      tls-server/0 (name=HOSTNAME) (port=443)
+    
+    DESCRIPTION
+    
+      tls-server runs a simple TLS server. This is intended for testing SNI routing, not
+      for any sort of real-world scenario. It will generate a new self-signed
+      certificate each time it runs, with a very short validity period (3 days).
+    
+  #+END_EXAMPLE
+
+
+** version
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      version - print version information to STDOUT
+    
+    FORMS
+      version/1 format
+      version/0 (format='long')
+    
+    FORMATS
+      short - print only the version number
+      long  - print the program name and version number
+      major - print only the major version
+      minor - print only the minor version
+      patch - print only the patch version
+    
+    DESCRIPTION
+    
+      version is intended for use when generating documentation, but is exposed as part
+      of the public API to support packaging and distribution efforts.
+    
+  #+END_EXAMPLE
+
+
+** x509-common-name
+
+  #+BEGIN_EXAMPLE
+    
+    NAME
+      x509-common-name - read an X509 certificate on STDIN and print the Common Name to STDOUT
+    
+    FORMS
+      x509-common-name/1 file
+      x509-common-name/0 (read from STDIN)
+    
+    DESCRIPTION
+    
+      x509-common-name extracts the Common Name (CN) from an X509 certificate.
+    
+    SEE ALSO
+      remote-certificate
+    
+  #+END_EXAMPLE
+
+
+* License
+
+  ~circuit~ is available under The MIT License (MIT), see =LICENSE.txt= for the 
+full text.
+
+* Copyright
+
+  Copyright (c) 2017 Chris Olstrom <chris@olstrom.com>
+  Copyright (c) 2017 SUSE LLC
+
