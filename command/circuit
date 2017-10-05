@@ -515,8 +515,7 @@ DESCRIPTION
 
     case ${#} in
         2) certificate=$(mktemp -t ${PROGRAM_NAME}.${0}.XXXXXX)
-           openssl req -new -nodes -days "${@}" -x509 -subj "/CN=${1}" \
-                   2>/dev/null 1>"${certificate}"
+           openssl req -new -nodes -days "${2}" -x509 -subj "/CN=${1}" 2>/dev/null 1>"${certificate}"
            print -r -- "${certificate}" ;;
         1) ${0} "${@}" 30               ;;
         0) ${0} "${HOSTNAME}"           ;;
