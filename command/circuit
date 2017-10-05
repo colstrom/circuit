@@ -1,0 +1,815 @@
+#! /usr/bin/env mksh
+# -*- shell-script -*-
+
+###############
+## Constants ##
+###############
+
+PROGRAM_NAME=${0##*/}
+
+VERSION_MAJOR=1
+VERSION_MINOR=0
+VERSION_PATCH=0
+
+EINVAL=22
+
+LICENSE='
+The MIT License (MIT)
+Copyright (c) 2017 Chris Olstrom <chris@olstrom.com>
+Copyright (c) 2017 SUSE LLC
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+'
+
+OVERVIEW="
+* Overview
+
+  ~${PROGRAM_NAME}~ is a tool for detection of linked containers, and for
+  generation of haproxy configuration fragments to assist with routing to these
+  linked containers.
+
+  If ~${PROGRAM_NAME}~ is invoked with no arguments, it defaults to the
+  ~generate-configuration~ function, which discovers linked hosts (as one might
+  find in a container running with Docker), and generates a set of rules that
+  route to the appropriate ports for those hosts, based on SNI lookups. Hosts
+  with matching certificates are automatically grouped for load balancing, and
+  monitored for availability via TCP health checks. Unreachable hosts are
+  removed from the load balancer until they become reachable again.
+
+  ~${PROGRAM_NAME}~ is intended for use within Docker containers, and makes
+  assumptions that may not hold in other environments. Most functionality is
+  exposed through a collection of subcommands that make up the public API.
+
+* Notes
+
+  If ${PROGRAM_NAME} is invoked with a name matching any of the functions in the
+  public API, it will act as that function. This may be useful for using
+  ${PROGRAM_NAME} in scripts.
+"
+
+STYLE='
+* Documentation Style
+
+  The --help output of public functions includes a =FORMS= section, describing
+  the interface of that function. The style of these is intended to be both
+  human-friendly and simple to parse with tools like ~awk~:
+
+  #+BEGIN_EXAMPLE
+
+    function/arity required-argument (optional-argument=value)
+
+  #+END_EXAMPLE
+
+  As an example, a function called "greet" with one required argument "greeting"
+  and one optional argument "target" (that defaults to "world" if not given)
+  would be written like so:
+
+  #+BEGIN_EXAMPLE
+
+    FORMS
+      greet/2 greeting target
+      greet/1 greeting (target="world")
+
+  #+END_EXAMPLE
+'
+
+######################
+## Public Functions ##
+######################
+
+# These functions are part of the public interface to this program. If any
+# changes are made to these, or additional functions introduced, the program
+# version will be incremented according to Semantic Versioning 2.0.0.
+
+##,--------------------
+##| Discovery Functions
+##`--------------------
+
+function links
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - automatic link discovery
+
+FORMS
+  ${0}/0
+
+DESCRIPTION
+
+  ${0} automates link discovery. It does so by finding the intersection of:
+
+    - the set of linked hosts in the hostname database (/etc/hosts)
+    - the set of linked hosts given in the environment
+
+  This is reliable in the context of a container running with Docker. For other
+  scenarios, it may be more practical to use the individual discovery methods.
+
+SEE ALSO
+  environment-links, hostname-database-links
+"
+
+    hosts=$(mktemp -t "${PROGRAM_NAME}.${0}.hosts.XXXXXX")
+    environment=$(mktemp -t "${PROGRAM_NAME}.${0}.environment.XXXXXX")
+    hostname-database-links >"${hosts}"
+    environment-links | tr _ - >"${environment}"
+    comm -12 "${hosts}" "${environment}"
+    rm -f "${hosts}" "${environment}"
+}
+
+function environment-links
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print a sorted set of links from the environment to STDOUT
+
+FORMS
+  ${0}/0 (read from current environment)
+
+DESCRIPTION
+
+  ${0} discovers links in the environment, assuming the environment is similar
+  to a container running with Docker. Specifically, it looks for environment
+  keys ending in '_PORT', with values that start with a protocol.
+ "
+
+    case ${#} in
+        0) env \
+                 | awk -F = '$1 ~ /_PORT$/ && $2 ~ "^[[:alpha:]]+://" { sub("_PORT$", "", $1); print tolower($1) }' \
+                 | env LC_COLLATE=C sort \
+                 | uniq           ;;
+        *) invalid-arguments ${0} ;;
+    esac
+}
+
+function hostname-database-links
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print a sorted set of links from a hostname database to STDOUT
+
+FORMS
+  ${0}/1 file
+  ${0}/0 (file=/etc/hosts)
+
+DESCRIPTION
+
+  ${0} discovers links in the hostname database (/etc/hosts by default).
+  Specifically, it finds names of IPv4 hosts, excluding itself.
+"
+
+    case ${#} in
+        1) awk '$1 !~ /:/ && $1 !~ /^127./' "${1}" \
+                 | awk -F "\t" '{ print $2 }' \
+                 | tr [:space:] "\n" \
+                 | awk '$0 != "'${HOSTNAME}'"' \
+                 | env LC_COLLATE=C sort \
+                 | uniq           ;;
+        0) ${0} /etc/hosts        ;;
+        *) invalid-arguments ${0} ;;
+    esac
+}
+
+function linked-port
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - given a host, print the host and primary port to STDOUT
+
+FORMS
+  ${0}/1 host
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} finds the primary exposed port for a host, assuming the environment is
+  similar to a container running with Docker. Specifically, it looks for
+  environment keys that match the upcased hostname with '_PORT' appended (and
+  dashes replaced with underscores).
+"
+
+    case ${#} in
+        1) env \
+                 | awk -F = '$1 == toupper("'${1//-/_}'_PORT") { print $2 }' \
+                 | awk -F : '{ print "'${1}'", $(NF) }' ;;
+        0) map ${0}                                     ;;
+        *) invalid-arguments ${0}                       ;;
+    esac
+}
+
+function remote-certificate
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print the TLS certificate from a remote host to STDOUT
+
+FORMS
+  ${0}/2 host port
+  ${0}/1 host (port=443)
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} connects to a remote TLS host, prints the certificate to STDOUt, and
+  closes the connection.
+
+SEE ALSO
+  x509-common-name
+"
+
+    case ${#} in
+        2) openssl s_client -connect "${1}:${2}" </dev/null 2>/dev/null ;;
+        1) ${0} "${@}" 443                                              ;;
+        *) invalid-arguments ${0}                                       ;;
+    esac
+}
+
+function x509-common-name
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - read an X509 certificate on STDIN and print the Common Name to STDOUT
+
+FORMS
+  ${0}/1 file
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} extracts the Common Name (CN) from an X509 certificate.
+
+SEE ALSO
+  remote-certificate
+"
+
+    case ${#} in
+        1) ${0} <"${@}" ;;
+        0) openssl x509 -noout -subject \
+                 | awk 'BEGIN { RS="/"; FS="=" } $1 == "CN" { print $2 }' \
+                 | awk '!/^$/' ;;
+        *) invalid-arguments ${0}
+    esac
+}
+
+##,----------------------------
+##| Config Generation Functions
+##`----------------------------
+
+function generate-configuration
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - write configuration for SNI routing to available links to STDOUT
+
+FORMS
+  ${0}/1 name
+  ${0}/0 (name=HOSTNAME)
+
+DESCRIPTION
+
+  ${0} writes a complete configuration file for haproxy to STDOUT.
+
+STABILITY
+
+  The FORMS and the *general functionality* the output are stable and will
+  conform to Semantic Versioning 2.0.0. The literal output however, is NOT
+  considered stable, and may change at any time. Do not rely on it.
+"
+
+    print -r -- "defaults
+  timeout client 30s
+  timeout server 30s
+  timeout connect 5s
+"
+
+    define-tcp-frontend "${1:-${HOSTNAME}}"
+
+    fragments="$(generate-link-fragments ${workdir})"
+
+    if [[ -f ${fragments}/frontend ]]
+    then env LC_COLLATE=C sort "${fragments}/frontend" \
+            | uniq
+    fi
+
+    find ${fragments}/backend -type f \
+        | env LC_COLLATE=C sort \
+        | xargs cat
+
+    rm -rf "${fragments}"
+}
+
+function generate-link-fragments
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - generate config fragments for links and print directory to STDOUT
+
+FORMS
+  ${0}/1 dir
+  ${0}/0 (dir=(mktemp))
+
+DESCRIPTION
+
+  ${0} generates a collection of haproxy configuration fragments for all
+  available links and writes them to a directory, then prints that directory
+  name to STDOUT. The directory structure is as follows:
+
+    DIR/frontend      - (FILE) frontend configuration
+    DIR/backends/     - (DIR) contains backend configurations
+    DIR/backends/NAME - (FILE) configuration for backend NAME
+"
+
+    workdir="${1:-$(mktemp -dt ${PROGRAM_NAME}.${0}.XXXXXX)}"
+
+    mkdir -p ${workdir}/backend
+
+    links \
+        | map linked-port \
+        | while read -r host port
+    do remote-certificate "${host}" "${port}" \
+            | x509-common-name \
+            | while read -r name
+        do
+            frontend-sni-lookup "${name}" >>"${workdir}/frontend"
+            backend="${workdir}/backend/${name}"
+            [[ -f ${backend} ]] || define-tcp-backend "${name}" >"${backend}"
+            define-server "${name}-${host}" "${host}" "${port}" >>"${backend}"
+        done
+    done
+
+    print -- "${workdir}"
+}
+
+function define-tcp-frontend
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - write a frontend definition to STDOUT
+
+FORMS
+  ${0}/2 name port
+  ${0}/1 name (port=443)
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} generates a configuration fragment for haproxy that defines a TCP
+  frontend that binds to a port (443 by default) and accepts TLS connections.
+"
+
+    case ${#} in
+        2) print -- "
+frontend ${1}
+  bind :${2}
+  mode tcp
+
+  tcp-request inspect-delay 5s
+  tcp-request content accept if { req_ssl_hello_type 1 }
+" ;;
+        1) ${0} "${@}" 443 ;;
+        0) map ${0}        ;;
+    esac
+}
+
+function define-tcp-backend
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - write a backend definition to STDOUT
+
+FORMS
+  ${0}/2 name algorithm
+  ${0}/1 name (algorithm='roundrobin')
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} generates a configuration fragment for haproxy that defines a TCP backend
+  with load-balancing (roundrobin by default).
+"
+    case ${#} in
+        2) print -- "
+backend ${1}
+  mode tcp
+  balance ${2}
+" ;;
+        1) ${0} "${@}" roundrobin             ;;
+        0) map ${0}                           ;;
+        *) invalid-arguments ${0}             ;;
+    esac
+}
+
+function define-server
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - write a server definition to STDOUT
+
+FORMS
+  ${0}/3 alias host port
+  ${0}/2 alias host (port=443)
+  ${0}/1 alias (host=alias) (port=443)
+  ${0} (read from STDIN)
+
+DESCRIPTION
+
+  ${0} generates a configuration fragment for haproxy that defines a server with
+  health checks enabled.
+"
+
+    case ${#} in
+        3) print -r -- "  server ${1} ${2}:${3} check" ;;
+        2) ${0} "${@}" 443                             ;;
+        1) ${0} "${@}" "${1}"                          ;;
+        0) map ${0}                                    ;;
+        *) invalid-arguments ${0}                      ;;
+    esac
+}
+
+function frontend-sni-lookup
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - write a frontend SNI lookup to STDOUT
+
+FORMS
+  ${0}/2 name backend
+  ${0}/1 name (backend=name)
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} generates a configuration fragment for haproxy that matches the Server
+  Name Indication of a TLS request from a frontend to the appropriate backend.
+"
+
+    case ${#} in
+        2) print -r -- "  use_backend ${2} if { req.ssl_sni -i ${1} }" ;;
+        1) ${0} "${@}" "${1}"                                          ;;
+        0) map ${0}                                                    ;;
+        *) invalid-arguments ${0}                                      ;;
+    esac
+}
+
+function backend-sni-lookup
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - write a backend SNI lookup to STDOUT
+
+FORMS
+  ${0}/2 name server
+  ${0}/1 name (server=name)
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} generates a configuration fragment for haproxy that matches the Server
+  Name Indication of a TLS request from a backend to the appropriate server.
+"
+
+    case ${#} in
+        2) print -r -- "  use-server ${2} if { req.ssl_sni -i ${1} }" ;;
+        1) ${0} "${@}" "${1}"                                         ;;
+        0) map ${0}                                                   ;;
+        *) invalid-arguments ${0}                                     ;;
+    esac
+}
+
+##,------------------
+##| Testing Functions
+##`------------------
+
+function self-signed-certificate
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - generate a self-signed TLS certificate and write the filename to STDOUT
+
+FORMS
+  ${0}/2 name expires
+  ${0}/1 name (expires=30)
+  ${0}/0 (name=HOSTNAME)
+
+DESCRIPTION
+
+  ${0} writes a new (unencrypted and self-signed) TLS certificate to a file,
+  then prints that filename to STDOUT. This is intended to be used for testing
+  SNI routing, not for any sort of real-world scenario.
+"
+
+    case ${#} in
+        2) certificate=$(mktemp -t ${PROGRAM_NAME}.${0}.XXXXXX)
+           openssl req -new -nodes -days "${@}" -x509 -subj "/CN=${1}" \
+                   2>/dev/null 1>"${certificate}"
+           print -r -- "${certificate}" ;;
+        1) ${0} "${@}" 30               ;;
+        0) ${0} "${HOSTNAME}"           ;;
+        *) invalid-arguments ${0}       ;;
+    esac
+}
+
+function tls-server
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - run a simple TLS server
+
+FORMS
+  ${0}/2 name port
+  ${0}/1 name (port=443)
+  ${0}/0 (name=HOSTNAME) (port=443)
+
+DESCRIPTION
+
+  ${0} runs a simple TLS server. This is intended for testing SNI routing, not
+  for any sort of real-world scenario. It will generate a new self-signed
+  certificate each time it runs, with a very short validity period (3 days).
+"
+
+    case ${#} in
+        2) openssl s_server -cert "$(self-signed-certificate ${1} 3)" -accept "${2}" ;;
+        1) ${0} "${1}" 443 ;;
+        0) ${0} "${HOSTNAME}" ;;
+    esac
+}
+
+##,------------------------
+##| Documentation Functions
+##`------------------------
+
+function org-manual
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - generate manual (Org)
+
+FORMS
+  ${0}/0
+
+DESCRIPTION
+
+  ${0} generates documentation for ${PROGRAM_NAME} in Org format. Conversion to
+  other formats is beyond the scope of this program, and should be handled with
+  a tool such as ~pandoc~.
+"
+
+    print -r -- "#+TITLE: ${PROGRAM_NAME} - hands-free SNI routing with haproxy
+#+LATEX: \pagebreak
+
+${OVERVIEW}
+${STYLE}
+* Commands
+
+  #+BEGIN_EXAMPLE
+$(help | awk '{ print "    " $0 }')
+  #+END_EXAMPLE
+"
+
+    for function in "${API[@]}"
+    do print -r -- "
+** ${function}
+
+  #+BEGIN_EXAMPLE
+$(${function} --help | awk '{ print "    " $0 }')
+  #+END_EXAMPLE
+"
+    done
+
+    print -r -- "
+* License
+
+  $(license summary)
+
+* Copyright
+
+$(license copyright | awk '{ print "  " $0 }')
+"
+
+    exit 0
+}
+
+function license
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print license information to STDOUT
+
+FORMS
+  ${0}/1 format
+  ${0}/0 (format=full)
+
+FORMATS
+  full      - prints the full license text
+  name      - prints only the license name
+  copyright - prints only the copyright information
+  summary   - prints a short summary
+
+DESCRIPTION
+
+  ${0} is intended for use when generating documentation, but is exposed as part
+  of the public API to support packaging and distribution efforts.
+"
+
+    case "${1}" in
+        full)      print -r -- "${LICENSE}"            ;;
+        name)      ${0} full | awk '!/^$/' | head -n 1 ;;
+        copyright) ${0} full | awk '/^Copyright/'      ;;
+        summary)
+            print -r -- "~${PROGRAM_NAME}~ is available under $(${0} name), see =LICENSE.txt= for the full text." \
+                | fold -sw 80                          ;;
+        "") ${0} full                                  ;;
+        *) invalid-arguments ${0}                      ;;
+    esac
+}
+
+function version
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print version information to STDOUT
+
+FORMS
+  ${0}/1 format
+  ${0}/0 (format='long')
+
+FORMATS
+  short - print only the version number
+  long  - print the program name and version number
+  major - print only the major version
+  minor - print only the minor version
+  patch - print only the patch version
+
+DESCRIPTION
+
+  ${0} is intended for use when generating documentation, but is exposed as part
+  of the public API to support packaging and distribution efforts.
+"
+
+    case "${1}" in
+        major) print -r -- "${VERSION_MAJOR}"                              ;;
+        minor) print -r -- "${VERSION_MINOR}"                              ;;
+        patch) print -r -- "${VERSION_PATCH}"                              ;;
+        short) print -r -- "$(${0} major)"."$(${0} minor)"."$(${0} patch)" ;;
+        long)  print -r -- "${PROGRAM_NAME} $(${0} short)"                 ;;
+        "") ${0} long                                                      ;;
+        *) invalid-arguments ${0}
+    esac
+}
+
+function list-commands
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print a list of available commands to STDOUT
+
+FORMS
+  ${0}/0
+
+DESCRIPTION
+
+  ${0} is intended for use when generating documentation, but is exposed as part
+  of the public API to support packaging and distribution efforts, and automated
+  testing.
+"
+
+    for function in "${API[@]}"
+    do print -r -- "${function}"
+    done
+}
+
+function show-source
+{
+    [[ ${1} = --help ]] && exit-after-printing "
+NAME
+  ${0} - print the source of a function to STDOUT
+
+FORMS
+  ${0}/1 function
+  ${0}/0 (read from STDIN)
+
+DESCRIPTION
+
+  ${0} is intended for use when generating documentation and reviewing changes
+  to ${PROGRAM_NAME}. However, it can also be used to extract functions for
+  reuse in other programs.
+"
+
+    case ${#} in
+        1) print -- "#! /usr/bin/env mksh\n"
+           license full | awk '{ print "# " $0 }'
+           print -r
+           typeset -f "${1}"      ;;
+        0) map ${0}               ;;
+        *) invalid-arguments ${0} ;;
+    esac
+}
+
+set -A API -- $(typeset +f)
+
+#######################
+## Private Functions ##
+#######################
+
+# These functions are not part of the public interface to this program.
+
+function help
+{
+    print -r -- "
+NAME
+  ${PROGRAM_NAME}
+
+COMMANDS
+"
+    for function in "${API[@]}"
+    do print -r -- "  ${function}"
+    done
+
+    print -r
+}
+
+function exit-after-printing
+{
+    print -r -- "${1}"
+    exit "${2:-0}"
+}
+
+function invalid-arguments
+{
+    exit-after-printing "
+${PROGRAM_NAME}: ${1}: invalid arguments (check --help for syntax)
+" "${EINVAL}" 1>&2
+}
+
+function map
+{
+    while read -r
+    do "${@}" ${REPLY}
+    done
+}
+
+function contains
+{
+    case ${#} in
+        0) return "${EINVAL}" ;;
+        1) false ;;
+        *) needle="${1}"
+           shift 1
+           for haystack
+           do if [[ ${needle} = ${haystack} ]]
+              then return 0
+              fi
+           done
+    esac
+
+    false
+}
+
+function is-public-function
+{
+    (( ${#} )) && contains "${1}" "${API[@]}"
+}
+
+
+function main
+{
+    case "${1}" in
+        -h|--help)    help     ; exit 0 ;;
+        -V|--version) version  ; exit 0 ;;
+    esac
+
+    command=invalid
+
+    for function in "${API[@]}"
+    do [[ ${1} = ${function} ]] && command="${1}"
+    done
+
+    [[ ${command} = invalid ]] && exit "${EINVAL}"
+
+    shift 1
+
+    case ${#} in
+        0) "${command}"        ;;
+        *) "${command}" "${@}" ;;
+    esac
+}
+
+if is-public-function "${PROGRAM_NAME}"
+then main "${PROGRAM_NAME}" "${@}"
+else main "${@:-generate-configuration}"
+fi
