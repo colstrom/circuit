@@ -9,7 +9,7 @@ PROGRAM_NAME=${0##*/}
 
 VERSION_MAJOR=1
 VERSION_MINOR=0
-VERSION_PATCH=0
+VERSION_PATCH=1
 
 EINVAL=22
 
@@ -598,7 +598,7 @@ $(${function} --help | awk '{ print "    " $0 }')
 
 * Copyright
 
-$(license copyright | awk '{ print "  " $0 }')
+$(license copyright | awk '{ print "  - " $0 }')
 "
 
     exit 0
