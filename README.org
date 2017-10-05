@@ -520,6 +520,6 @@ full text.
 
 * Copyright
 
-  Copyright (c) 2017 Chris Olstrom <chris@olstrom.com>
-  Copyright (c) 2017 SUSE LLC
+  - Copyright (c) 2017 Chris Olstrom <chris@olstrom.com>
+  - Copyright (c) 2017 SUSE LLC
 
