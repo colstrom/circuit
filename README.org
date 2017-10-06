@@ -395,7 +395,7 @@
     
     DESCRIPTION
     
-      remote-certificate connects to a remote TLS host, prints the certificate to STDOUt, and
+      remote-certificate connects to a remote TLS host, prints the certificate to STDOUT, and
       closes the connection.
     
     SEE ALSO
