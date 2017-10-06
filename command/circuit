@@ -9,7 +9,7 @@ PROGRAM_NAME=${0##*/}
 
 VERSION_MAJOR=1
 VERSION_MINOR=0
-VERSION_PATCH=1
+VERSION_PATCH=3
 
 EINVAL=22
 
@@ -225,7 +225,7 @@ FORMS
 
 DESCRIPTION
 
-  ${0} connects to a remote TLS host, prints the certificate to STDOUt, and
+  ${0} connects to a remote TLS host, prints the certificate to STDOUT, and
   closes the connection.
 
 SEE ALSO
